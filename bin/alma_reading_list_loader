@@ -1,0 +1,166 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+
+require 'leganto_sync/reading_lists/aspire'
+
+
+# Parses the command line and returns
+def get_command_line_options
+
+  options = {}
+
+  option_parser = OptionParser.new do |opts|
+
+    opts.banner = 'Usage: alma_reading_list_loader [options]'
+
+    opts.on('-cCOURSEFILE', '--courses=COURSEFILE', 'Alma course loader file (CSV)') do |course_loader_file|
+      options[:course_loader_file] = course_loader_file
+    end
+
+    opts.on('-eEMAILFILE', '--email=EMAILFILE', 'Email address selection rules file') do |email_rules_file|
+      options[:email_rules_file] = email_rules_file
+    end
+
+    opts.on('-h', '--help', 'Displays this help') do
+      puts opts
+      exit
+    end
+
+    help = 'The template for output filenames. May include the tokens ' \
+           '%{d} (day of month 00-31), ' \
+           '%{e} (end item sequence number NNNNNNNN), ' \
+           '%{f} (file sequence number), ' \
+           '%{m} (month of year 01-12), ' \
+           '%{s} (start item sequence number NNNNNNNN), ' \
+           '%{y} (year YYYY)'
+    opts.on('-oOUTFILE', '--out=OUTFILE', help) do |out_file|
+      options[:out_file] = out_file
+    end
+
+    opts.on('-lHOST', '--ldap-host=HOST', 'LDAP server host') do |ldap_host|
+      options[:ldap_host] = ldap_host
+    end
+
+    opts.on('-pPASSWD', '--ldap-passwd=PASSWD', 'LDAP server password') do |ldap_password|
+      options[:ldap_password] = ldap_password
+    end
+
+    opts.on('-uUSER', '--ldap-user=USER', 'LDAP server username') do |ldap_user|
+      options[:ldap_user] = ldap_user
+    end
+
+  end
+  option_parser.parse!(options)
+
+  options[:ldap_host] = ENV['LEGANTO_LDAP_HOST'] unless options[:ldap_host]
+  options[:ldap_password] = ENV['LEGANTO_LDAP_PASSWORD'] unless options[:ldap_password]
+  options[:ldap_user] = ENV['LEGANTO_LDAP_USER'] unless options[:ldap_user]
+
+  options
+
+end
+
+def get_aspire_factory(options)
+  aspire_api = nil
+  email_selector = nil
+  ldap_lookup = nil
+  users = nil
+  LegantoSync::ReadingLists::Aspire::Factory.new(aspire_api, email_selector: email_selector, ldap_lookup: ldap_lookup,
+                                                 users: users)
+end
+
+def get_aspire_lists_file(options)
+
+end
+
+def write_reading_list(csv, list_id, courses)
+  list = get_reading_list(list_id)
+  list.modules.each do |mod|
+    # Get the course codes applicable to this module (i.e. all cohorts for the module)
+    course_codes = courses[mod.code]
+    next if course_codes.nil? || course_codes.empty?
+    course_codes.each do |course_code|
+      list.each_item do |item|
+        csv << self.alma_reading_list_loader_row(list, item, course_code)
+      end
+    end
+  end
+end
+
+
+# Get the command-line options
+options = get_command_line_options
+
+# Get the Aspire reading list object factory
+factory = get_aspire_factory(options)
+
+# Get the Aspire all-lists report file
+lists_file = get_aspire_lists_file(options)
+
+# Build a hash of module code => [ [course-code, section-id, searchable-id1, searchable-id2, searchable-id3], ... ]
+courses = get_courses(options)
+
+#lists = [@list_id_1, @list_id_2, @list_id_3]
+csv = nil
+csv_file = nil
+file_count = 0
+file_items = 0
+file_max = options[:max_items_per_file]
+new_file = true
+
+CSV.foreach(lists_file) do |list_details|
+
+  # Get the list URI from the report
+  list_uri = list[1]
+
+  # Get the list from the Aspire API
+  list = factory.get(list_uri)
+
+  # Get the number of items in the list
+  list_items = list.length
+
+  # Repeat while a new file is required to contain the list
+  while true
+
+    # Create a new file if required by a previous iteration
+    if new_file
+
+      # Close any current file
+      csv_file.close if csv_file
+
+      # Get the new filename and increment the file counter
+      file_name = "#{ENV['DIR_ALMA']}/reading_lists_#{file_count}.csv"
+      file_count += 1
+
+      # Open the new file and create a CSV wrapper for it
+      csv_file = open(file_name, 'wb')
+      csv = CSV.new(csv_file, {force_quotes: true})
+
+      # Write the column headings
+      csv << alma_reading_list_loader_row
+
+      # Reset the count of items in the file and clear the new_file flag
+      file_items = 1    # Include the header row
+      new_file = false
+
+    end
+
+    # Check that the list would not exceed the maximum file size
+    if file_max > 0 and file_items + list_items > file_max
+      # The list would exceed the maximum file size, create a new file and write the whole list to it
+      new_file = true
+      continue
+    end
+
+    # Write the list
+    file_items += list_items
+    write_reading_list(csv, list_id, courses)
+
+    # Exit the waiting-for-new-file loop
+    break
+
+  end
+
+end
+

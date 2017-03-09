@@ -1,0 +1,3 @@
+module LegantoSync
+
+end
